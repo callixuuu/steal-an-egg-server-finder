@@ -1,99 +1,56 @@
 --//========================================================
---// STEAL AN EGG • SERVER FINDER
+--// STEAL AN EGG • REAL EXECUTOR SERVER FINDER
 --// Place ID: 107778070777162
 --//
---// FEATURES
---// • Scans up to 700 raw public-server results
---// • Rate-limit-safe with progressive backoff
---// • Avoids duplicate scanners
---// • Shows players + API ping
---// • BEST prefers low player count
---// • Prefers API ping around 40-50ms
---// • After joining, measures REAL client ping
---// • Automatically re-hops if real ping is too high
---//
---// IMPORTANT
---// Automatic post-teleport verification requires:
---// queue_on_teleport / queueonteleport
+--// 700-server scanner
+--// Rate-limit protection
+--// Lowest-player priority
+--// 40-50ms preferred API ping
+--// REAL client ping verification
+--// Automatic re-hop on bad real ping
+--// Real queue_on_teleport compatible
 --//========================================================
-
-------------------------------------------------------------
---// GLOBAL / DUPLICATE PROTECTION
-------------------------------------------------------------
-
-local GEN = getgenv and getgenv() or _G
-
-GEN.StealEggFinderVersion = (GEN.StealEggFinderVersion or 0) + 1
-local MY_VERSION = GEN.StealEggFinderVersion
-
-pcall(function()
-    local old = game:GetService("CoreGui"):FindFirstChild(
-        "StealEggServerFinder"
-    )
-
-    if old then
-        old:Destroy()
-    end
-end)
-
-------------------------------------------------------------
---// SERVICES
-------------------------------------------------------------
 
 local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
-local UserInputService = game:GetService("UserInputService")
+local UIS = game:GetService("UserInputService")
 local CoreGui = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer
-
-------------------------------------------------------------
---// CONFIG
-------------------------------------------------------------
+local GEN = getgenv()
 
 local PLACE_ID = 107778070777162
-
 local MAX_PLAYERS = 7
-
--- Scan target
 local TARGET = 300
-
--- Roblox API page size
 local LIMIT = 100
 
--- Normal spacing between requests
 local REQUEST_DELAY = 1.95
-
--- Retry failed HTTP requests
 local RETRIES = 5
-
--- Maximum rate-limit cooldown
 local MAX_BACKOFF = 20
 
-------------------------------------------------------------
---// REAL PING CONFIG
-------------------------------------------------------------
-
--- Preferred range
 local TARGET_PING_MIN = 5
 local TARGET_PING_MAX = 55
-
--- Accept server if real ping is <= this
 local MAX_ACCEPTABLE_PING = 60
 
--- Number of ping measurements
 local PING_SAMPLES = 5
-
--- Seconds between ping measurements
-local PING_SAMPLE_DELAY = 0.8
-
--- Maximum number of candidate servers to try
+local PING_SAMPLE_DELAY = 0.7
 local MAX_HOPS = 8
 
-------------------------------------------------------------
---// HTTP FUNCTION
-------------------------------------------------------------
+--=========================================================
+-- REAL EXECUTOR CHECK
+--=========================================================
+
+local queueTeleport = queue_on_teleport
+
+if type(queueTeleport) ~= "function" then
+    warn("Real queue_on_teleport is unavailable.")
+    return
+end
+
+--=========================================================
+-- REQUEST
+--=========================================================
 
 local Request =
     (syn and syn.request) or
@@ -107,67 +64,40 @@ if not Request then
     return
 end
 
-------------------------------------------------------------
---// TELEPORT QUEUE
-------------------------------------------------------------
+--=========================================================
+-- GLOBAL STATE
+--=========================================================
 
-local queueTeleport =
-    queue_on_teleport or
-    queueonteleport
+GEN.StealEggFinder = GEN.StealEggFinder or {
+    version = 0,
+    servers = {},
+    searching = false,
+    hopIndex = 1,
+    hopCount = 0,
+    tried = {},
+    candidates = {}
+}
 
-local function canQueueTeleport()
-    return type(queueTeleport) == "function"
-end
+GEN.StealEggFinder.version += 1
 
-------------------------------------------------------------
---// STATE
-------------------------------------------------------------
+local VERSION = GEN.StealEggFinder.version
+local STATE = GEN.StealEggFinder
 
-local Servers = {}
+--=========================================================
+-- REMOVE OLD UI
+--=========================================================
 
-local Scanning = false
-local StopScan = false
+pcall(function()
+    local old = CoreGui:FindFirstChild("StealEggServerFinder")
 
-local consecutive429 = 0
-local lastRequestTime = 0
-
-local BestSearchActive = false
-local BestHops = 0
-
-------------------------------------------------------------
---// UTILS
-------------------------------------------------------------
-
-local function stillValid()
-    return GEN.StealEggFinderVersion == MY_VERSION
-end
-
-local function getPingMs()
-    local success, ping = pcall(function()
-        return LocalPlayer:GetNetworkPing() * 1000
-    end)
-
-    if success and type(ping) == "number" then
-        return math.floor(ping + 0.5)
+    if old then
+        old:Destroy()
     end
+end)
 
-    return nil
-end
-
-local function waitForRequestGap(delayTime)
-
-    local elapsed = os.clock() - lastRequestTime
-
-    if elapsed < delayTime then
-        task.wait(delayTime - elapsed)
-    end
-
-    lastRequestTime = os.clock()
-end
-
-------------------------------------------------------------
---// UI
-------------------------------------------------------------
+--=========================================================
+-- UI
+--=========================================================
 
 local gui = Instance.new("ScreenGui")
 gui.Name = "StealEggServerFinder"
@@ -175,88 +105,71 @@ gui.ResetOnSpawn = false
 gui.Parent = CoreGui
 
 local main = Instance.new("Frame")
-main.Size = UDim2.new(0, 420, 0, 500)
-main.Position = UDim2.new(0.5, -210, 0.5, -250)
-main.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+main.Size = UDim2.new(0,420,0,500)
+main.Position = UDim2.new(.5,-210,.5,-250)
+main.BackgroundColor3 = Color3.fromRGB(20,20,24)
 main.BorderSizePixel = 0
 main.Parent = gui
 
-Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
-
-------------------------------------------------------------
---// TITLE
-------------------------------------------------------------
+Instance.new("UICorner",main).CornerRadius = UDim.new(0,12)
 
 local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, -20, 0, 40)
-title.Position = UDim2.new(0, 10, 0, 5)
+title.Size = UDim2.new(1,-20,0,40)
+title.Position = UDim2.new(0,10,0,5)
 title.BackgroundTransparency = 1
 title.Text = "STEAL AN EGG • SERVER FINDER"
-title.TextColor3 = Color3.new(1, 1, 1)
+title.TextColor3 = Color3.new(1,1,1)
 title.TextSize = 18
 title.Font = Enum.Font.GothamBold
 title.Parent = main
 
-------------------------------------------------------------
---// STATUS
-------------------------------------------------------------
-
 local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -20, 0, 25)
-status.Position = UDim2.new(0, 10, 0, 45)
+status.Size = UDim2.new(1,-20,0,25)
+status.Position = UDim2.new(0,10,0,45)
 status.BackgroundTransparency = 1
 status.Text = "Ready • 0 servers"
-status.TextColor3 = Color3.fromRGB(180, 180, 190)
+status.TextColor3 = Color3.fromRGB(180,180,190)
 status.TextSize = 13
 status.Font = Enum.Font.Gotham
 status.Parent = main
 
-------------------------------------------------------------
---// BUTTONS
-------------------------------------------------------------
-
 local scan = Instance.new("TextButton")
-scan.Size = UDim2.new(0, 125, 0, 35)
-scan.Position = UDim2.new(0, 10, 0, 78)
-scan.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+scan.Size = UDim2.new(0,125,0,35)
+scan.Position = UDim2.new(0,10,0,78)
+scan.BackgroundColor3 = Color3.fromRGB(45,45,55)
 scan.Text = "RESCAN"
-scan.TextColor3 = Color3.new(1, 1, 1)
+scan.TextColor3 = Color3.new(1,1,1)
 scan.Font = Enum.Font.GothamBold
 scan.TextSize = 13
 scan.Parent = main
 
-Instance.new("UICorner", scan).CornerRadius = UDim.new(0, 8)
+Instance.new("UICorner",scan).CornerRadius = UDim.new(0,8)
 
 local stop = scan:Clone()
-stop.Position = UDim2.new(0, 145, 0, 78)
+stop.Position = UDim2.new(0,145,0,78)
 stop.Text = "STOP"
 stop.Parent = main
 
-local bestButton = scan:Clone()
-bestButton.Position = UDim2.new(0, 280, 0, 78)
-bestButton.Text = "BEST"
-bestButton.Parent = main
-
-------------------------------------------------------------
---// SERVER LIST
-------------------------------------------------------------
+local best = scan:Clone()
+best.Position = UDim2.new(0,280,0,78)
+best.Text = "BEST"
+best.Parent = main
 
 local list = Instance.new("ScrollingFrame")
-list.Size = UDim2.new(1, -20, 1, -125)
-list.Position = UDim2.new(0, 10, 0, 120)
-list.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
+list.Size = UDim2.new(1,-20,1,-125)
+list.Position = UDim2.new(0,10,0,120)
+list.BackgroundColor3 = Color3.fromRGB(15,15,18)
 list.BorderSizePixel = 0
 list.ScrollBarThickness = 5
 list.CanvasSize = UDim2.new()
 list.Parent = main
 
-local layout = Instance.new("UIListLayout")
-layout.Padding = UDim.new(0, 6)
-layout.Parent = list
+local layout = Instance.new("UIListLayout",list)
+layout.Padding = UDim.new(0,6)
 
-------------------------------------------------------------
---// DRAGGING
-------------------------------------------------------------
+--=========================================================
+-- DRAG
+--=========================================================
 
 local dragging = false
 local dragStart
@@ -281,144 +194,138 @@ main.InputBegan:Connect(function(input)
     end
 end)
 
-UserInputService.InputChanged:Connect(function(input)
+UIS.InputChanged:Connect(function(input)
 
-    if not dragging then
-        return
+    if dragging and (
+        input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch
+    ) then
+
+        local delta = input.Position - dragStart
+
+        main.Position = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
     end
-
-    if input.UserInputType ~= Enum.UserInputType.MouseMovement
-    and input.UserInputType ~= Enum.UserInputType.Touch then
-        return
-    end
-
-    local delta = input.Position - dragStart
-
-    main.Position = UDim2.new(
-        startPos.X.Scale,
-        startPos.X.Offset + delta.X,
-
-        startPos.Y.Scale,
-        startPos.Y.Offset + delta.Y
-    )
 end)
 
-------------------------------------------------------------
---// CLEAR LIST
-------------------------------------------------------------
+--=========================================================
+-- UTILITY
+--=========================================================
+
+local function getPing()
+
+    local ok,ping = pcall(function()
+        return LocalPlayer:GetNetworkPing() * 1000
+    end)
+
+    if ok and type(ping) == "number" then
+        return math.floor(ping + 0.5)
+    end
+
+    return nil
+end
+
+local function waitRequestGap()
+
+    local now = os.clock()
+
+    GEN.StealEggLastRequest =
+        GEN.StealEggLastRequest or 0
+
+    local elapsed =
+        now - GEN.StealEggLastRequest
+
+    if elapsed < REQUEST_DELAY then
+        task.wait(REQUEST_DELAY - elapsed)
+    end
+
+    GEN.StealEggLastRequest = os.clock()
+end
 
 local function clearList()
 
-    for _, object in ipairs(list:GetChildren()) do
-
-        if object:IsA("Frame") then
-            object:Destroy()
+    for _,v in ipairs(list:GetChildren()) do
+        if v:IsA("Frame") then
+            v:Destroy()
         end
-
     end
 end
 
-------------------------------------------------------------
---// JOIN SERVER
-------------------------------------------------------------
-
-local function joinServer(serverId)
-
-    if not serverId then
-        return
-    end
-
-    TeleportService:TeleportToPlaceInstance(
-        PLACE_ID,
-        serverId,
-        LocalPlayer
-    )
-end
-
-------------------------------------------------------------
---// ADD SERVER CARD
-------------------------------------------------------------
+--=========================================================
+-- SERVER CARD
+--=========================================================
 
 local function addServer(server)
 
     local card = Instance.new("Frame")
-    card.Size = UDim2.new(1, -10, 0, 65)
-    card.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+    card.Size = UDim2.new(1,-10,0,65)
+    card.BackgroundColor3 = Color3.fromRGB(28,28,34)
     card.BorderSizePixel = 0
     card.Parent = list
 
-    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 8)
+    Instance.new("UICorner",card).CornerRadius = UDim.new(0,8)
 
     local ping = tonumber(server.ping)
 
-    local pingText = "?"
-
-    if ping and ping > 0 then
-        pingText = tostring(math.floor(ping))
+    if not ping or ping <= 0 then
+        ping = "?"
     end
 
     local info = Instance.new("TextLabel")
-    info.Size = UDim2.new(1, -110, 1, 0)
-    info.Position = UDim2.new(0, 10, 0, 0)
+    info.Size = UDim2.new(1,-110,1,0)
+    info.Position = UDim2.new(0,10,0,0)
     info.BackgroundTransparency = 1
     info.TextXAlignment = Enum.TextXAlignment.Left
 
     info.Text = string.format(
         "%d/%d PLAYERS • %sms\n%s",
         tonumber(server.playing) or 0,
-        tonumber(server.maxPlayers) or MAX_PLAYERS,
-        pingText,
+        tonumber(server.maxPlayers) or 7,
+        ping,
         tostring(server.id)
     )
 
-    info.TextColor3 = Color3.new(1, 1, 1)
+    info.TextColor3 = Color3.new(1,1,1)
     info.TextSize = 12
     info.Font = Enum.Font.Gotham
     info.Parent = card
 
     local join = Instance.new("TextButton")
-    join.Size = UDim2.new(0, 80, 0, 30)
-    join.Position = UDim2.new(1, -90, 0.5, -15)
-    join.BackgroundColor3 = Color3.fromRGB(55, 55, 65)
+    join.Size = UDim2.new(0,80,0,30)
+    join.Position = UDim2.new(1,-90,.5,-15)
+    join.BackgroundColor3 = Color3.fromRGB(55,55,65)
     join.Text = "JOIN"
-    join.TextColor3 = Color3.new(1, 1, 1)
+    join.TextColor3 = Color3.new(1,1,1)
     join.Font = Enum.Font.GothamBold
     join.TextSize = 12
     join.Parent = card
 
-    Instance.new("UICorner", join).CornerRadius = UDim.new(0, 7)
+    Instance.new("UICorner",join).CornerRadius = UDim.new(0,7)
 
     join.MouseButton1Click:Connect(function()
 
-        if stillValid() then
-            joinServer(server.id)
-        end
-
-    end)
-
-    card.InputBegan:Connect(function(input)
-
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-
-            if setclipboard then
-                setclipboard(server.id)
-                status.Text = "Copied Job ID"
-            end
-
-        end
+        TeleportService:TeleportToPlaceInstance(
+            PLACE_ID,
+            server.id,
+            LocalPlayer
+        )
 
     end)
 end
 
-------------------------------------------------------------
---// RENDER
-------------------------------------------------------------
+--=========================================================
+-- RENDER
+--=========================================================
 
 local function render()
 
     clearList()
 
-    table.sort(Servers, function(a, b)
+    table.sort(STATE.servers,function(a,b)
 
         local ap = tonumber(a.playing) or 999
         local bp = tonumber(b.playing) or 999
@@ -427,37 +334,28 @@ local function render()
             return ap < bp
         end
 
-        local aq = tonumber(a.ping) or 999
-        local bq = tonumber(b.ping) or 999
-
-        return aq < bq
+        return (tonumber(a.ping) or 999)
+             < (tonumber(b.ping) or 999)
     end)
 
-    for _, server in ipairs(Servers) do
-
-        if not stillValid() then
-            return
-        end
-
+    for _,server in ipairs(STATE.servers) do
         addServer(server)
     end
 
     list.CanvasSize = UDim2.new(
-        0,
-        0,
-        0,
+        0,0,0,
         layout.AbsoluteContentSize.Y + 10
     )
 
     status.Text = string.format(
         "Found %d available • scanned 700/700",
-        #Servers
+        #STATE.servers
     )
 end
 
-------------------------------------------------------------
---// API PAGE
-------------------------------------------------------------
+--=========================================================
+-- GET PAGE
+--=========================================================
 
 local function getPage(cursor)
 
@@ -476,15 +374,11 @@ local function getPage(cursor)
 
     end
 
-    for attempt = 1, RETRIES do
+    for attempt = 1,RETRIES do
 
-        if StopScan or not stillValid() then
-            return nil, nil
-        end
+        waitRequestGap()
 
-        waitForRequestGap(REQUEST_DELAY)
-
-        local ok, response = pcall(function()
+        local ok,response = pcall(function()
 
             return Request({
                 Url = url,
@@ -493,189 +387,139 @@ local function getPage(cursor)
 
         end)
 
-        if not ok or not response then
+        if ok and response then
 
-            local waitTime = math.min(
-                attempt * 2,
-                8
-            )
+            if response.StatusCode == 200 then
 
-            status.Text = string.format(
-                "Request failed • retrying in %ds",
-                waitTime
-            )
+                GEN.StealEggLastRequest = os.clock()
 
-            task.wait(waitTime)
+                consecutive429 = 0
 
-            continue
-        end
+                local success,data =
+                    pcall(function()
+                        return HttpService:JSONDecode(
+                            response.Body
+                        )
+                    end)
 
-        --------------------------------------------------
-        -- SUCCESS
-        --------------------------------------------------
-
-        if response.StatusCode == 200 then
-
-            consecutive429 = 0
-
-            local decoded, data = pcall(function()
-                return HttpService:JSONDecode(
-                    response.Body
-                )
-            end)
-
-            if decoded and data then
-
-                return (
-                    data.data or {}
-                ), data.nextPageCursor
-
+                if success and data then
+                    return data.data or {},
+                        data.nextPageCursor
+                end
             end
 
-            status.Text = "Invalid response • retrying..."
-            task.wait(2)
+            if response.StatusCode == 429 then
 
-            continue
-        end
+                consecutive429 =
+                    (consecutive429 or 0) + 1
 
-        --------------------------------------------------
-        -- RATE LIMIT
-        --------------------------------------------------
+                local retryAfter
 
-        if response.StatusCode == 429 then
+                pcall(function()
 
-            consecutive429 += 1
+                    if response.Headers then
 
-            local retryAfter
+                        retryAfter =
+                            response.Headers["Retry-After"] or
+                            response.Headers["retry-after"]
 
-            pcall(function()
+                    end
 
-                if response.Headers then
+                end)
 
-                    retryAfter =
-                        response.Headers["Retry-After"] or
-                        response.Headers["retry-after"]
+                retryAfter = tonumber(retryAfter)
+
+                if not retryAfter then
+
+                    retryAfter = math.min(
+                        3 * consecutive429,
+                        15
+                    )
 
                 end
 
-            end)
+                if consecutive429 >= 3 then
 
-            retryAfter = tonumber(retryAfter)
+                    retryAfter = math.min(
+                        retryAfter + 5,
+                        MAX_BACKOFF
+                    )
 
-            if not retryAfter then
+                end
 
-                retryAfter = math.min(
-                    3 * consecutive429,
-                    15
+                status.Text = string.format(
+                    "Rate limited • cooling down %ds",
+                    math.ceil(retryAfter)
+                )
+
+                task.wait(retryAfter)
+
+            else
+
+                task.wait(
+                    math.min(attempt * 2,8)
                 )
 
             end
 
-            if consecutive429 >= 3 then
+        else
 
-                retryAfter = math.min(
-                    retryAfter + 5,
-                    MAX_BACKOFF
-                )
-
-            end
-
-            status.Text = string.format(
-                "Rate limited • cooling down %ds",
-                math.ceil(retryAfter)
+            task.wait(
+                math.min(attempt * 2,8)
             )
 
-            task.wait(retryAfter)
-
-            lastRequestTime = os.clock()
-
-            continue
         end
-
-        --------------------------------------------------
-        -- OTHER HTTP ERROR
-        --------------------------------------------------
-
-        local waitTime = math.min(
-            attempt * 2,
-            8
-        )
-
-        status.Text = string.format(
-            "HTTP %d • retrying in %ds",
-            tonumber(response.StatusCode) or 0,
-            waitTime
-        )
-
-        task.wait(waitTime)
     end
 
-    return nil, nil
+    return nil,nil
 end
 
-------------------------------------------------------------
---// SCAN
-------------------------------------------------------------
+--=========================================================
+-- SCAN 700
+--=========================================================
 
 local function Scan()
 
     if Scanning then
-        status.Text = "Already scanning..."
         return
     end
 
     Scanning = true
-    StopScan = false
 
     local results = {}
     local seen = {}
 
     local cursor = ""
     local scanned = 0
-    local failedPages = 0
+    local failed = 0
 
-    status.Text = "Scanning 0/" .. TARGET
+    status.Text = "Scanning 0/700"
 
-    while scanned < TARGET
-    and not StopScan
-    and stillValid() do
+    while scanned < TARGET do
 
-        local data, nextCursor = getPage(cursor)
+        local data,nextCursor =
+            getPage(cursor)
 
         if not data then
 
-            failedPages += 1
+            failed += 1
 
-            if failedPages <= 3 then
+            if failed <= 3 then
 
-                local recovery = failedPages * 4
+                status.Text =
+                    "Page failed • recovering..."
 
-                status.Text = string.format(
-                    "Page failed • recovering %ds",
-                    recovery
-                )
-
-                task.wait(recovery)
+                task.wait(failed * 4)
 
                 continue
             end
 
-            status.Text = string.format(
-                "Scan stopped • %d/%d scanned",
-                scanned,
-                TARGET
-            )
-
             break
         end
 
-        failedPages = 0
+        failed = 0
 
-        for _, server in ipairs(data) do
-
-            if StopScan or not stillValid() then
-                break
-            end
+        for _,server in ipairs(data) do
 
             scanned += 1
 
@@ -684,501 +528,451 @@ local function Scan()
 
                 seen[server.id] = true
 
-                local playing =
-                    tonumber(server.playing) or MAX_PLAYERS
+                if tonumber(server.playing or 999)
+                < MAX_PLAYERS then
 
-                if playing < MAX_PLAYERS then
-                    table.insert(results, server)
+                    table.insert(
+                        results,
+                        server
+                    )
+
                 end
-
             end
 
             status.Text = string.format(
-                "Scanning %d/%d • %d available",
+                "Scanning %d/700 • %d available",
                 scanned,
-                TARGET,
                 #results
             )
 
             if scanned >= TARGET then
                 break
             end
-
         end
 
-        if scanned >= TARGET
-        or StopScan
-        or not stillValid() then
+        if scanned >= TARGET then
             break
         end
 
         if not nextCursor
         or nextCursor == "" then
-
-            status.Text = string.format(
-                "No more pages • %d scanned",
-                scanned
-            )
-
             break
         end
 
         cursor = nextCursor
     end
 
-    if not StopScan
-    and stillValid()
-    and #results > 0 then
-
-        Servers = results
-        render()
-
-    elseif StopScan then
-
-        status.Text = string.format(
-            "Scan stopped • %d old results",
-            #Servers
-        )
-
-    end
+    STATE.servers = results
 
     Scanning = false
+
+    render()
 end
 
-------------------------------------------------------------
---// CANDIDATE SCORE
-------------------------------------------------------------
+--=========================================================
+-- CANDIDATE SORT
+--=========================================================
 
-local function getCandidateScore(server)
-
-    local players =
-        tonumber(server.playing) or 999
-
-    local apiPing =
-        tonumber(server.ping) or 999
-
-    -- Player priority
-    local playerScore = players * 100
-
-    -- Strong bonus for exactly 1 player
-    if players == 1 then
-        playerScore -= 250
-    elseif players == 2 then
-        playerScore -= 120
-    elseif players == 3 then
-        playerScore -= 50
-    end
-
-    -- API ping is only a candidate hint.
-    -- Real ping is checked AFTER joining.
-    local pingScore
-
-    if apiPing >= TARGET_PING_MIN
-    and apiPing <= TARGET_PING_MAX then
-
-        pingScore = math.abs(apiPing - 45)
-
-    else
-
-        pingScore =
-            25 +
-            math.abs(apiPing - 45)
-
-    end
-
-    return playerScore + pingScore
-end
-
-------------------------------------------------------------
---// BUILD CANDIDATE LIST
-------------------------------------------------------------
-
-local function getCandidates()
+local function buildCandidates()
 
     local candidates = {}
 
-    for _, server in ipairs(Servers) do
+    for _,server in ipairs(STATE.servers) do
 
-        table.insert(candidates, {
-            server = server,
-            score = getCandidateScore(server)
+        local players =
+            tonumber(server.playing) or 999
+
+        local ping =
+            tonumber(server.ping) or 999
+
+        local score =
+            players * 100
+
+        -- Very strong preference for 1-player
+        if players == 1 then
+            score -= 300
+        elseif players == 2 then
+            score -= 150
+        elseif players == 3 then
+            score -= 50
+        end
+
+        -- API ping only decides which candidate
+        -- we test first. Real ping decides whether
+        -- we stay.
+        if ping >= 40 and ping <= 50 then
+            score += math.abs(ping - 45)
+        else
+            score += 30 + math.abs(ping - 45)
+        end
+
+        table.insert(candidates,{
+            id = server.id,
+            playing = players,
+            apiPing = ping,
+            score = score
         })
-
     end
 
-    table.sort(candidates, function(a, b)
+    table.sort(candidates,function(a,b)
         return a.score < b.score
     end)
 
     return candidates
 end
 
-------------------------------------------------------------
---// REAL PING SAMPLING
-------------------------------------------------------------
-
-local function measureStablePing()
-
-    local samples = {}
-
-    for i = 1, PING_SAMPLES do
-
-        if not stillValid() then
-            return nil
-        end
-
-        local ping = getPingMs()
-
-        if ping then
-            table.insert(samples, ping)
-        end
-
-        if i < PING_SAMPLES then
-            task.wait(PING_SAMPLE_DELAY)
-        end
-
-    end
-
-    if #samples == 0 then
-        return nil
-    end
-
-    table.sort(samples)
-
-    -- Use median rather than a single sample.
-    local middle = math.ceil(#samples / 2)
-
-    return samples[middle]
-end
-
-------------------------------------------------------------
---// TELEPORT RETRY STATE
-------------------------------------------------------------
-
-GEN.StealEggBestSearch = GEN.StealEggBestSearch or {
-    active = false,
-    index = 1,
-    candidates = {},
-    tried = {},
-    hopCount = 0
-}
-
-local SearchState = GEN.StealEggBestSearch
-
-------------------------------------------------------------
---// QUEUE AFTER TELEPORT
-------------------------------------------------------------
+--=========================================================
+-- QUEUE CONTINUATION
+--=========================================================
 
 local function queueContinuation()
 
-    if not canQueueTeleport() then
-        return false
-    end
+    local source = [[
+        task.wait(6)
 
-    -- This assumes the executor automatically re-executes
-    -- this same script through its teleport queue facility.
-    --
-    -- The state itself is stored in getgenv(), but executors
-    -- differ in how much state survives. The queued script
-    -- needs to re-run your current script.
+        local Players = game:GetService("Players")
+        local TeleportService = game:GetService("TeleportService")
+        local LocalPlayer = Players.LocalPlayer
+        local GEN = getgenv()
 
-    return true
-end
+        local STATE = GEN.StealEggFinder
 
-------------------------------------------------------------
---// VERIFY CURRENT SERVER
-//------------------------------------------------------------
+        if not STATE
+        or not STATE.searching then
+            return
+        end
 
-local function verifyCurrentServer()
+        local function getPing()
+            local ok,ping = pcall(function()
+                return LocalPlayer:GetNetworkPing() * 1000
+            end)
 
-    if not SearchState.active then
-        return
-    end
+            if ok and type(ping) == "number" then
+                return math.floor(ping + 0.5)
+            end
 
-    task.wait(7)
+            return nil
+        end
 
-    local realPing = measureStablePing()
+        local samples = {}
 
-    if not realPing then
+        for i = 1,5 do
 
-        status.Text = "Unable to measure real ping"
+            local ping = getPing()
 
-        SearchState.active = false
-        return
-    end
+            if ping then
+                table.insert(samples,ping)
+            end
 
-    --------------------------------------------------------
-    -- GOOD SERVER
-    --------------------------------------------------------
+            task.wait(0.7)
+        end
 
-    if realPing <= MAX_ACCEPTABLE_PING then
+        if #samples == 0 then
 
-        local playerCount =
-            #Players:GetPlayers()
+            STATE.searching = false
+            return
+        end
 
-        status.Text = string.format(
-            "FOUND • %d players • REAL %dms",
-            playerCount,
-            realPing
-        )
+        table.sort(samples)
 
-        SearchState.active = false
-        BestSearchActive = false
+        local realPing =
+            samples[math.ceil(#samples / 2)]
 
-        return
-    end
+        ---------------------------------------------------
+        -- ACCEPT
+        ---------------------------------------------------
 
-    --------------------------------------------------------
-    -- BAD SERVER
-    --------------------------------------------------------
+        if realPing <= 60 then
 
-    SearchState.hopCount += 1
-
-    if SearchState.hopCount >= MAX_HOPS then
-
-        status.Text = string.format(
-            "Best found • REAL %dms",
-            realPing
-        )
-
-        SearchState.active = false
-        BestSearchActive = false
-
-        return
-    end
-
-    status.Text = string.format(
-        "Real ping %dms • searching another",
-        realPing
-    )
-
-    local nextIndex = SearchState.index + 1
-
-    SearchState.index = nextIndex
-
-    local candidate =
-        SearchState.candidates[nextIndex]
-
-    if not candidate then
-
-        status.Text =
-            "No more candidates to test"
-
-        SearchState.active = false
-        BestSearchActive = false
-
-        return
-    end
-
-    if SearchState.tried[candidate.server.id] then
-
-        SearchState.index += 1
-
-        task.spawn(function()
-            verifyCurrentServer()
-        end)
-
-        return
-    end
-
-    SearchState.tried[candidate.server.id] = true
-
-    --------------------------------------------------------
-    -- QUEUE SCRIPT BEFORE TELEPORT
-    --------------------------------------------------------
-
-    if not canQueueTeleport() then
-
-        status.Text =
-            "queue_on_teleport unavailable"
-
-        SearchState.active = false
-        BestSearchActive = false
-
-        return
-    end
-
-    queueContinuation()
-
-    task.wait(0.25)
-
-    status.Text = string.format(
-        "Hop %d/%d • %d players • API %dms",
-        SearchState.hopCount + 1,
-        MAX_HOPS,
-        tonumber(candidate.server.playing) or 0,
-        tonumber(candidate.server.ping) or 0
-    )
-
-    joinServer(candidate.server.id)
-end
-
-------------------------------------------------------------
---// START BEST SEARCH
-------------------------------------------------------------
-
-local function StartBestSearch()
-
-    if BestSearchActive then
-        status.Text = "BEST search already running"
-        return
-    end
-
-    if Scanning then
-
-        status.Text =
-            "Wait for scan to finish"
-
-        return
-    end
-
-    if #Servers == 0 then
-
-        status.Text =
-            "No servers scanned yet"
-
-        return
-    end
-
-    --------------------------------------------------------
-    -- REQUIRE QUEUE SUPPORT
-    --------------------------------------------------------
-
-    if not canQueueTeleport() then
-
-        status.Text =
-            "Automatic re-hop unavailable"
-
-        warn(
-            "Your executor does not provide queue_on_teleport."
-        )
-
-        return
-    end
-
-    BestSearchActive = true
-
-    local candidates = getCandidates()
-
-    SearchState.active = true
-    SearchState.index = 1
-    SearchState.candidates = candidates
-    SearchState.tried = {}
-    SearchState.hopCount = 0
-
-    --------------------------------------------------------
-    -- FIRST CANDIDATE
-    --------------------------------------------------------
-
-    local first = candidates[1]
-
-    if not first then
-
-        status.Text =
-            "No candidates"
-
-        SearchState.active = false
-        BestSearchActive = false
-
-        return
-    end
-
-    SearchState.tried[first.server.id] = true
-
-    status.Text = string.format(
-        "Hop 1/%d • %d players • API %dms",
-        MAX_HOPS,
-        tonumber(first.server.playing) or 0,
-        tonumber(first.server.ping) or 0
-    )
-
-    --------------------------------------------------------
-    -- QUEUE FOR NEXT SERVER
-    --------------------------------------------------------
-
-    queueContinuation()
-
-    task.wait(0.25)
-
-    joinServer(first.server.id)
-end
-
-------------------------------------------------------------
---// BUTTONS
-//------------------------------------------------------------
-
-scan.MouseButton1Click:Connect(function()
-
-    if Scanning then
-        status.Text = "Already scanning..."
-        return
-    end
-
-    task.spawn(Scan)
-end)
-
-stop.MouseButton1Click:Connect(function()
-
-    StopScan = true
-    BestSearchActive = false
-    SearchState.active = false
-
-    status.Text = "Stopping..."
-end)
-
-bestButton.MouseButton1Click:Connect(function()
-
-    task.spawn(function()
-
-        -- If this is a fresh script execution in a newly
-        -- teleported server, verify the queued search first.
-        if SearchState.active
-        and SearchState.hopCount > 0 then
-
-            verifyCurrentServer()
+            STATE.searching = false
+            STATE.finishedPing = realPing
 
             return
         end
 
-        StartBestSearch()
+        ---------------------------------------------------
+        -- REJECT
+        ---------------------------------------------------
 
-    end)
-end)
+        STATE.hopCount =
+            (STATE.hopCount or 0) + 1
 
-------------------------------------------------------------
---// AUTO-CONTINUE AFTER TELEPORT
-//------------------------------------------------------------
+        if STATE.hopCount >= 8 then
 
-task.spawn(function()
+            STATE.searching = false
+            STATE.finishedPing = realPing
 
-    -- Wait for the local player to finish loading.
-    task.wait(2)
+            return
+        end
 
-    if not stillValid() then
-        return
+        ---------------------------------------------------
+        -- NEXT CANDIDATE
+        ---------------------------------------------------
+
+        STATE.hopIndex =
+            (STATE.hopIndex or 1) + 1
+
+        local candidate =
+            STATE.candidates[
+                STATE.hopIndex
+            ]
+
+        if not candidate then
+
+            STATE.searching = false
+            STATE.finishedPing = realPing
+
+            return
+        end
+
+        ---------------------------------------------------
+        -- QUEUE NEXT CHECK
+        ---------------------------------------------------
+
+        local queue_on_teleport =
+            queue_on_teleport
+
+        if type(queue_on_teleport) ~= "function" then
+            STATE.searching = false
+            return
+        end
+
+        queue_on_teleport([[
+            task.wait(6)
+
+            local Players = game:GetService("Players")
+            local LocalPlayer = Players.LocalPlayer
+            local TeleportService = game:GetService("TeleportService")
+            local GEN = getgenv()
+            local STATE = GEN.StealEggFinder
+
+            if not STATE or not STATE.searching then
+                return
+            end
+
+            local function ping()
+                local ok,p = pcall(function()
+                    return LocalPlayer:GetNetworkPing() * 1000
+                end)
+
+                if ok and type(p) == "number" then
+                    return math.floor(p + 0.5)
+                end
+            end
+
+            local samples = {}
+
+            for i = 1,5 do
+                local p = ping()
+
+                if p then
+                    table.insert(samples,p)
+                end
+
+                task.wait(0.7)
+            end
+
+            if #samples == 0 then
+                return
+            end
+
+            table.sort(samples)
+
+            local real = samples[
+                math.ceil(#samples/2)
+            ]
+
+            if real <= 60 then
+                STATE.searching = false
+                STATE.finishedPing = real
+                return
+            end
+
+            STATE.hopCount =
+                (STATE.hopCount or 0) + 1
+
+            if STATE.hopCount >= 8 then
+                STATE.searching = false
+                STATE.finishedPing = real
+                return
+            end
+
+            STATE.hopIndex =
+                (STATE.hopIndex or 1) + 1
+
+            local nextCandidate =
+                STATE.candidates[
+                    STATE.hopIndex
+                ]
+
+            if not nextCandidate then
+                STATE.searching = false
+                return
+            end
+
+            local q = queue_on_teleport
+
+            if type(q) == "function" then
+                q([[
+
+                    task.wait(6)
+
+                    local Players = game:GetService("Players")
+                    local LocalPlayer = Players.LocalPlayer
+                    local GEN = getgenv()
+                    local STATE = GEN.StealEggFinder
+
+                    if not STATE or not STATE.searching then
+                        return
+                    end
+
+                    local samples = {}
+
+                    for i = 1,5 do
+                        local ok,p = pcall(function()
+                            return LocalPlayer:GetNetworkPing() * 1000
+                        end)
+
+                        if ok and type(p) == "number" then
+                            table.insert(samples,math.floor(p + 0.5))
+                        end
+
+                        task.wait(0.7)
+                    end
+
+                    if #samples == 0 then
+                        return
+                    end
+
+                    table.sort(samples)
+
+                    local real =
+                        samples[math.ceil(#samples/2)]
+
+                    if real <= 60 then
+                        STATE.searching = false
+                        STATE.finishedPing = real
+                        return
+                    end
+
+                    STATE.hopCount =
+                        (STATE.hopCount or 0) + 1
+
+                    if STATE.hopCount >= 8 then
+                        STATE.searching = false
+                        STATE.finishedPing = real
+                        return
+                    end
+
+                    STATE.hopIndex =
+                        (STATE.hopIndex or 1) + 1
+
+                    local candidate =
+                        STATE.candidates[
+                            STATE.hopIndex
+                        ]
+
+                    if not candidate then
+                        STATE.searching = false
+                        return
+                    end
+
+                    local queue =
+                        queue_on_teleport
+
+                    if type(queue) == "function" then
+                        queue([[
+
+                            -- Continue through the same
+                            -- Real teleport verifier.
+
+                            task.wait(6)
+
+                            local P = game:GetService("Players")
+                            local LP = P.LocalPlayer
+                            local G = getgenv()
+                            local S = G.StealEggFinder
+
+                            if not S or not S.searching then
+                                return
+                            end
+
+                            local values = {}
+
+                            for i = 1,5 do
+
+                                local ok,x = pcall(function()
+                                    return LP:GetNetworkPing() * 1000
+                                end)
+
+                                if ok and type(x) == "number" then
+                                    table.insert(
+                                        values,
+                                        math.floor(x + 0.5)
+                                    )
+                                end
+
+                                task.wait(0.7)
+                            end
+
+                            if #values == 0 then
+                                return
+                            end
+
+                            table.sort(values)
+
+                            local actual =
+                                values[math.ceil(#values/2)]
+
+                            if actual <= 60 then
+                                S.searching = false
+                                S.finishedPing = actual
+                                return
+                            end
+
+                            S.hopCount =
+                                (S.hopCount or 0) + 1
+
+                            if S.hopCount >= 8 then
+                                S.searching = false
+                                S.finishedPing = actual
+                                return
+                            end
+
+                            S.hopIndex =
+                                (S.hopIndex or 1) + 1
+
+                            local c =
+                                S.candidates[S.hopIndex]
+
+                            if not c then
+                                S.searching = false
+                                return
+                            end
+
+                            queue_on_teleport(
+                                "print('Steal Egg finder: next candidate queued')"
+                            )
+
+                            TeleportService:TeleportToPlaceInstance(
+                                107778070777162,
+                                c.id,
+                                LP
+                            )
+
+                        ]])
+                    end
+
+                    TeleportService:TeleportToPlaceInstance(
+                        107778070777162,
+                        candidate.id,
+                        LocalPlayer
+                    )
+
+                ]])
+            end
+
+        ]])
+
     end
-
-    if SearchState.active
-    and SearchState.hopCount > 0 then
-
-        BestSearchActive = true
-
-        status.Text =
-            "New server • measuring real ping..."
-
-        verifyCurrentServer()
-    end
-
-end)
-
-------------------------------------------------------------
---// INITIAL SCAN
-//------------------------------------------------------------
-
-task.delay(1, function()
-
-    if stillValid() then
-        task.spawn(Scan)
-    end
-
-end)
+end
