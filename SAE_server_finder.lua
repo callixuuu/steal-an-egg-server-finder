@@ -41,11 +41,11 @@ local LocalPlayer = Players.LocalPlayer
 local PLACE_ID = 107778070777162
 
 local MAX_PLAYERS = 7
-local TARGET = 700
+local TARGET = 300
 local LIMIT = 100
 
 -- Request pacing
-local DELAY = 1.15
+local DELAY = 1.75
 local RETRIES = 5
 
 -- Rate-limit maximum cooldown
